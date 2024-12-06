@@ -1,0 +1,696 @@
+---
+title: "Stock Modelling"
+output:
+  html_document:
+    theme: yeti
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(zoo)
+library(car)
+library(ggplot2)
+library(TTR)
+library(lubridate) 
+
+
+#clean data
+rm(list=ls())
+```
+Initial Data Loading
+```{r}
+
+wrds <- read.csv('/Users/jasonwang/Desktop/Stat Project 2 Enhanced/mtxntdtwc3ein7sm.csv')
+
+```
+
+Cleaning Process
+
+GOOG IPO 2004, 2014 Google issued a stock split to create a new class of nonvoting stock. Which led to GOOGL and GOOG, GOOGL only had data starting 2014, which led to duplication, and needed cleaning.
+
+Decided to removed META from FAANG, due to IPO date of 2012. And included MSFT due to our initial plan of using MSFT as variable.
+Using raw price, no adjustments for dividends or splits. (aka google 20 to 1 split not included)
+
+Convert Date to proper format 
+
+Removed unneeded columns
+
+Hold off on na removal, due to macro factors
+
+```{r}
+
+# 'date' is in Date format
+wrds$date <- as.Date(wrds$date)
+# Remove unnecessary columns
+wrds <- wrds %>%
+  select(-TRDSTAT, -SHRCLS, -EXCHCD, -PERMNO)
+
+# Filter data for tickers
+GOOG <- wrds %>%
+  filter(grepl("goog", TICKER, ignore.case = TRUE) & !grepl("googl", TICKER, ignore.case = TRUE)) # Predicting
+
+MSFT <- wrds %>% filter(grepl("msft", TICKER, ignore.case = TRUE)) # FAANG (aang)
+AAPL <- wrds %>% filter(grepl("aapl", TICKER, ignore.case = TRUE)) # FAANG (aang)
+AMZN <- wrds %>% filter(grepl("amzn", TICKER, ignore.case = TRUE)) # FAANG (aang)
+NFLX <- wrds %>% filter(grepl("nflx", TICKER, ignore.case = TRUE)) # FAANG (aang)
+
+
+
+```
+```{r eval=FALSE}
+
+# Export filtered datasets
+write.csv(GOOG, "/Users/jasonwang/Desktop/GOOG_data.csv", row.names = FALSE)
+write.csv(MSFT, "/Users/jasonwang/Desktop/MSFT_data.csv", row.names = FALSE)
+write.csv(AAPL, "/Users/jasonwang/Desktop/AAPL_data.csv", row.names = FALSE)
+write.csv(AMZN, "/Users/jasonwang/Desktop/AMZN_data.csv", row.names = FALSE)
+write.csv(NFLX, "/Users/jasonwang/Desktop/NFLX_data.csv", row.names = FALSE)
+
+#3
+GOOG <- read.csv('/Users/jasonwang/Desktop/GOOG_data.csv')
+MSFT <- read.csv('/Users/jasonwang/Desktop/MSFT_data.csv')
+AAPL <- read.csv('/Users/jasonwang/Desktop/AAPL_data.csv')
+AMZN <- read.csv('/Users/jasonwang/Desktop/AMZN_data.csv')
+NFLX <- read.csv('/Users/jasonwang/Desktop/NFLX_data.csv')
+
+GOOG$date <- as.Date(GOOG$date)
+MSFT$date <- as.Date(MSFT$date)
+AAPL$date <- as.Date(AAPL$date)
+AMZN$date <- as.Date(AMZN$date)
+NFLX$date <- as.Date(NFLX$date)
+
+```
+
+
+Macro Factors
+Some data is monthly, quarterly and daily.
+
+1. Date format
+2. Forward fill - Ensures all dates are present in the stock data by joining with a full date range
+
+Deal with issue of stock dates starting Jan 3rd, created full_stock_dates, which allowed forward fill data from Jan 1st
+
+High_Rate_Env: Binary indicator if Federal Funds Rate > 2.5%
+
+10-Year Treasury Yield less than 1.5%
+
+Recession - GDP decline compared to the previous period
+
+High Unemployment rate > 6 %
+
+
+
+```{r}
+# Load CSV files
+effective_rate <- read.csv("/Users/jasonwang/Desktop/Stat Project 2 Enhanced/Macro/DFF.csv") # Federal Funds Rate
+tenyear <- read.csv("/Users/jasonwang/Desktop/Stat Project 2 Enhanced/Macro/DGS10.csv") # 10-Year Treasury Yield
+unemployment <- read.csv("/Users/jasonwang/Desktop/Stat Project 2 Enhanced/Macro/UNRATE.csv") # Unemployment Rate
+gdp <- read.csv("/Users/jasonwang/Desktop/Stat Project 2 Enhanced/Macro/GDPC1.csv") # GDP
+
+# Ensure dates are in Date format for all macroeconomic datasets
+effective_rate$date <- as.Date(effective_rate$DATE)  # Federal Funds Rate
+tenyear$date <- as.Date(tenyear$DATE)                # 10-Year Treasury Yield
+unemployment$date <- as.Date(unemployment$DATE)      # Unemployment Rate
+gdp$date <- as.Date(gdp$DATE)                        # GDP
+
+# Forward-fill macroeconomic datasets before joining
+effective_rate <- effective_rate %>%
+  arrange(date) %>%
+  tidyr::fill(DFF, .direction = "down")  # Fill Federal Funds Rate
+
+tenyear <- tenyear %>%
+  arrange(date) %>%
+  tidyr::fill(DGS10, .direction = "down")  # Fill 10-Year Treasury Yield
+
+unemployment <- unemployment %>%
+  arrange(date) %>%
+  tidyr::fill(UNRATE, .direction = "down")  # Fill Unemployment Rate
+
+gdp <- gdp %>%
+  arrange(date) %>%
+  tidyr::fill(GDPC1, .direction = "down")  # Fill GDP
+
+# Ensure the stock data has a full date range starting from 2011-01-01
+full_stock_dates <- data.frame(date = seq(min(effective_rate$date), max(GOOG$date), by = "day"))
+
+# Extend GOOG stock dataset to include all dates in full_stock_dates
+GOOG <- full_stock_dates %>%
+  left_join(GOOG, by = "date") %>%
+  arrange(date)  # Ensure the dataset is sorted by date
+
+# Join the forward-filled macroeconomic data into the extended GOOG dataset
+GOOG <- GOOG %>%
+  left_join(effective_rate %>% select(date, FED_FUNDS = DFF), by = "date") %>%
+  left_join(tenyear %>% select(date, TEN_YEAR_YIELD = DGS10), by = "date") %>%
+  left_join(unemployment %>% select(date, UNEMP_RATE = UNRATE), by = "date") %>%
+  left_join(gdp %>% select(date, GDP = GDPC1), by = "date")
+
+
+# Forward-fill macroeconomic data within the GOOG dataset
+GOOG <- GOOG %>%
+  arrange(date) %>%  # Ensure data is sorted by date
+  tidyr::fill(UNEMP_RATE, GDP, .direction = "down")  # Forward-fill unemployment and GDP
+
+# Add dummy variables to GOOG dataset
+GOOG <- GOOG %>%
+  mutate(
+    # High-Rate Environment: Federal Funds Rate greater than threshold (e.g., 2.5%)
+    High_Rate_Env = ifelse(FED_FUNDS > 2.5, 1, 0),
+    
+    # Low-Yield Environment: 10-Year Treasury Yield less than threshold (e.g., 1.5%)
+    Low_Yield_Env = ifelse(TEN_YEAR_YIELD < 1.5, 1, 0),
+    
+    # High Unemployment: Unemployment Rate greater than a threshold (e.g., 6%)
+    High_Unemployment = ifelse(UNEMP_RATE > 6, 1, 0),
+    
+    # Recession Indicator: GDP lower than the previous period
+    Recession = ifelse(GDP < lag(GDP), 1, 0)
+  )
+
+```
+
+Combines stock data from multiple tickers (FAANG) AKA AANG + MSFT.
+
+Calculates lagged prices, volumes, and daily returns for analysis.
+
+Lagged RSI (Relative strength index) - Measures stock momentum using a 14-day lookback/ Flags if RSI exceeds thresholds (e.g., >70 or <30) 
+
+Traditionally, an RSI reading of 70 or above indicates an overbought condition. A reading of 30 or below indicates an oversold condition. 
+```{r}
+# Combine FAANG tickers into one dataset
+FAANG <- bind_rows(AAPL, AMZN, NFLX, MSFT)
+
+# Process FAANG Data
+# Ensure the data is sorted by date within each ticker
+FAANG <- FAANG %>%
+  arrange(TICKER, date) %>%
+  group_by(TICKER) %>%
+  mutate(
+    # Lag the independent variables
+    LagPRC = lag(PRC),         # Lagged Price
+    LagVolume = lag(VOL),      # Lagged Volume
+    LagOpenPrice = lag(OPENPRC) # Lagged Opening Price
+  ) %>%
+  ungroup() %>%
+  na.omit() # Remove rows with NA values caused by lagging
+
+# Calculate Returns for FAANG
+FAANG <- FAANG %>%
+  mutate(
+    ReturnPRC = (PRC / LagPRC) - 1,  # Current-day return
+    LagReturnPRC = lag((PRC / LagPRC) - 1, 1) # Lagged return (one day prior to GOOG)
+  )
+
+
+# Process GOOG Data
+GOOG <- GOOG %>%
+  arrange(date) %>%
+  mutate(
+    # Lag the independent variables
+    LagPRC = lag(PRC),        # Lagged Price
+    LagVolume = lag(VOL),     # Lagged Volume
+    LagOpenPrice = lag(OPENPRC) # Lagged Opening Price
+  ) %>%
+  na.omit() %>% # Remove rows with NA values caused by lagging
+  mutate(
+    # Calculate returns for all variables
+    ReturnPRC = (PRC / LagPRC) - 1,         # Return for Price
+    ReturnVolume = (VOL / LagVolume) - 1,   # Return for Volume
+    ReturnOpenPrice = (OPENPRC / LagOpenPrice) - 1 # Return for Opening Price
+  )
+
+# Add RSI and Lagged Indicators
+GOOG <- GOOG %>%
+  mutate(
+    RSI = RSI(PRC, n = 14),                # Calculate RSI with a 14-day lookback period
+    Overbought = ifelse(RSI > 70, 1, 0),  # Overbought condition (RSI > 70)
+    Oversold = ifelse(RSI < 30, 1, 0),    # Oversold condition (RSI < 30)
+    LagRSI = lag(RSI),                     # Lag RSI
+    LagOverbought = lag(Overbought),       # Lag Overbought indicator
+    LagOversold = lag(Oversold)            # Lag Oversold indicator
+  ) %>%
+  na.omit() # Remove rows with NA values caused by lagging
+
+
+```
+
+Lagging all FAANG, for modelling
+```{r}
+# Pivot FAANG lagged returns into columns by ticker
+FAANG_Lagged_Returns <- FAANG %>%
+  select(date, TICKER, LagReturnPRC) %>%
+  spread(key = TICKER, value = LagReturnPRC)
+
+# Rename columns for clarity
+colnames(FAANG_Lagged_Returns) <- c("date", "LagReturn_AAPL", "LagReturn_AMZN", "LagReturn_MSFT", "LagReturn_NFLX")
+
+# Merge lagged FAANG returns into GOOG dataset
+GOOG <- GOOG %>%
+  left_join(FAANG_Lagged_Returns, by = "date")
+
+
+```
+
+Dummies
+
+Moving average MA50/MA200 - Rolling averages of stock prices over 50 and 200 days.
+
+Bull_Market - Binary indicator if 50-day MA > 200-day MA.
+```{r}
+
+GOOG <- GOOG %>%
+  mutate(
+    MA50 = lag(rollmean(PRC, k = 50, fill = NA, align = "right")),
+    MA200 = lag(rollmean(PRC, k = 200, fill = NA, align = "right"))
+  )
+
+GOOG <- GOOG %>%
+  mutate(
+    Bull_Market = ifelse(MA50 > MA200, 1, 0),
+    High_Volatility = ifelse(abs(ReturnPRC) > 0.02, 1, 0)
+  )
+
+```
+
+Final Cleaning - Remove any N/A's
+```{r}
+GOOG <- GOOG %>%
+  drop_na()
+```
+
+
+split - Splits data into training and testing sets based on date ranges.
+```{r}
+# Split FAANG into training and testing sets
+train_data <- GOOG %>% filter(date >= "2011-01-01" & date <= "2014-12-31")
+test_data <- GOOG %>% filter(date >= "2015-01-01" & date <= "2019-12-31")
+```
+
+Linear Regression
+```{r}
+# Train the model
+model <- lm(PRC ~ LagOversold + LagReturn_AAPL + LagReturn_AMZN + LagReturn_MSFT + LagReturn_NFLX +
+              LagVolume + Low_Yield_Env + High_Unemployment + High_Volatility + MA200 + MA50 
+            , data = train_data)
+
+```
+Initially planned to add residual, but due to data leakage. We decided to exclude it from our data set
+```{r echo=FALSE}
+# Add residuals to the rows used in the model
+train_data <- train_data %>%
+  mutate(Residual = ifelse(row_number() %in% as.numeric(rownames(model$model)), resid(model), NA))
+
+```
+Two plots, one with confidence band and another without
+```{r echo=FALSE}
+# Predict on test data
+test_data <- test_data %>%
+  mutate(Predicted_PRC = predict(model, newdata = test_data))
+
+
+ggplot(test_data, aes(x = date)) +
+  geom_line(aes(y = PRC, color = "Actual Price")) +
+  geom_line(aes(y = Predicted_PRC, color = "Predicted Price")) +
+  labs(title = "Actual vs Predicted Prices",
+       x = "Date", y = "Price") +
+  theme_minimal() +
+  scale_color_manual("", values = c("Actual Price" = "blue", "Predicted Price" = "red"))
+
+# Predict on test data with confidence intervals
+prediction_with_intervals <- predict(model, newdata = test_data, interval = "confidence")
+
+# Add predictions and intervals to the test_data
+test_data <- test_data %>%
+  mutate(
+    Predicted_PRC = prediction_with_intervals[, "fit"],        # Predicted Price
+    Lower_Band = prediction_with_intervals[, "lwr"],           # Lower Confidence Band
+    Upper_Band = prediction_with_intervals[, "upr"]            # Upper Confidence Band
+  )
+
+# Plot actual prices, predicted prices, and confidence bands
+ggplot(test_data, aes(x = date)) +
+  geom_line(aes(y = PRC, color = "Actual Price")) +
+  geom_line(aes(y = Predicted_PRC, color = "Predicted Price")) +
+  geom_ribbon(aes(ymin = Lower_Band, ymax = Upper_Band), alpha = 0.8, fill = "pink") +
+  labs(
+    title = "Actual vs Predicted Prices with Confidence Bands",
+    x = "Date",
+    y = "Price"
+  ) +
+  theme_minimal() +
+  scale_color_manual("", values = c("Actual Price" = "blue", "Predicted Price" = "red"))
+
+```
+
+```{r echo=FALSE}
+# Calculate residuals from the training model
+train_data <- train_data %>%
+  mutate(Predicted_PRC = predict(model, newdata = train_data)) %>%
+  mutate(Residual = PRC - Predicted_PRC)  # Residual = Actual - Predicted
+
+
+# Create lagged residuals in the training data
+train_data <- train_data %>%
+  mutate(LagResidual = lag(Residual)) %>%
+  drop_na()  # Remove rows with NA caused by lagging
+
+# Calculate average residual from the training data
+average_residual <- mean(train_data$Residual, na.rm = TRUE)
+print(average_residual)  # Check the value
+
+
+# Merge lagged residuals into the test dataset
+test_data <- test_data %>%
+  mutate(
+    LagResidual = lag(train_data$Residual, n = 1)[1:nrow(test_data)],  # Use lagged residuals
+    LagResidual = ifelse(is.na(LagResidual), average_residual, LagResidual)  # Fill missing values with avg residual
+  )
+
+```
+
+We ended up not using residuals, but maintained this part, and just passed through with same, without the added residual. If we had residuals this would be where we added the residuals into our enhanced model.
+```{r}
+# Train a new model using residuals
+model_with_residuals <- lm(PRC ~  LagOversold + LagReturn_AAPL + LagReturn_AMZN + LagReturn_MSFT + LagReturn_NFLX +
+                         LagVolume + Low_Yield_Env + High_Unemployment + High_Volatility + MA200 + MA50, data = train_data)
+
+summary(model_with_residuals)
+
+
+```
+Test on the test data, to predict
+```{r}
+# Predict on test data using the residual-based model
+test_data <- test_data %>%
+  mutate(Predicted_PRC_With_Residuals = predict(model_with_residuals, newdata = test_data))
+
+```
+
+Trade Strategy
+
+This trade strategy is a buy only, where if it thinks stock will go up, it buys at start of day and sells at end
+```{r echo=FALSE, warning=FALSE}
+# Trading signals based on predicted return
+test_data <- test_data %>%
+  mutate(
+    Predicted_Return = (Predicted_PRC_With_Residuals / OPENPRC) - 1,  # Predicted return based on today's open price
+    Trade_Signal = ifelse(Predicted_Return > 0, "Buy", "Hold")        # Buy if predicted return is positive
+  )
+
+# Trading signals based on predicted return
+test_data <- test_data %>%
+  mutate(
+    Predicted_Return = (Predicted_PRC_With_Residuals / OPENPRC) - 1,  # Predicted return based on today's open price
+    Trade_Signal = ifelse(Predicted_Return > 0, "Buy", "Hold")        # Buy if predicted return is positive
+  )
+
+# Calculate daily returns based on today's price changes (only hold for one day)
+test_data <- test_data %>%
+  mutate(
+    Daily_Return = ifelse(
+      Trade_Signal == "Buy",
+      (PRC / lag(PRC, default = first(PRC))) - 1,  # Use first PRC as fallback
+      0
+    )
+  )
+
+# Replace or drop NA values in Daily_Return
+test_data <- test_data %>%
+  mutate(
+    Daily_Return = ifelse(is.na(Daily_Return), 0, Daily_Return)  # Replace NA with 0
+  )
+
+
+# Calculate cumulative returns
+test_data <- test_data %>%
+  mutate(
+    Cumulative_Return = cumprod(1 + Daily_Return) - 1 
+  )
+
+# Visualize cumulative returns
+ggplot(test_data, aes(x = date, y = Cumulative_Return)) +
+  geom_line(color = "blue") +
+  labs(title = "Cumulative Returns of One-Day Holding Strategy",
+       x = "Date", y = "Cumulative Return") +
+  theme_minimal()
+
+# Evaluate Sharpe Ratio
+mean_daily_return <- mean(test_data$Daily_Return, na.rm = TRUE)
+std_daily_return <- sd(test_data$Daily_Return, na.rm = TRUE)
+
+sharpe_ratio <- (mean_daily_return * 252) / (std_daily_return * sqrt(252))
+sharpe_ratio
+
+```
+Our Sharpe Ratio = 0.2258
+
+```{r}
+
+# Load SPY benchmark data
+spy_data <- read.csv("/Users/jasonwang/Desktop/Stat Project 2 Enhanced/spy.csv")
+
+# Convert date column
+spy_data$date <- as.Date(spy_data$datadate)
+
+```
+
+
+Checking for Variance Inflation Factor (VIF)
+Correlation between independent variables are pretty low < 5
+```{r echo=FALSE}
+
+# Check multicollinearity
+vif_values <- vif(model)
+print(vif_values)
+
+
+
+```
+
+```{r echo=FALSE, warning=FALSE}
+
+
+# Calculate daily returns for SPY (close-to-open)
+spy_data <- spy_data %>%
+  mutate(Daily_Return_SPY = (prccd - prcod) / prcod) %>%  # Daily return formula
+  drop_na()  # Remove rows with missing data
+
+# Filter data for matching date range
+test_data <- test_data %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2019-12-31"))
+
+spy_data <- spy_data %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2019-12-31"))
+
+# Set initial investment
+initial_investment <- 10000
+
+# Calculate cumulative portfolio value for SPY
+spy_data <- spy_data %>%
+  mutate(
+    Portfolio_Value_SPY = initial_investment * cumprod(1 + Daily_Return_SPY) # Portfolio value over time
+  )
+
+# Calculate cumulative portfolio value for Trading Strategy
+test_data <- test_data %>%
+  mutate(
+    Portfolio_Value_Strategy = initial_investment * cumprod(1 + Daily_Return) # Portfolio value over time
+  )
+
+# Combine both datasets for plotting
+comparison_data <- test_data %>%
+  select(date, Portfolio_Value_Strategy) %>%
+  left_join(spy_data %>% select(date, Portfolio_Value_SPY), by = "date")
+
+# Plot
+ggplot(comparison_data, aes(x = date)) +
+  geom_line(aes(y = Portfolio_Value_Strategy, color = "Trading Strategy")) +
+  geom_line(aes(y = Portfolio_Value_SPY, color = "SPY Benchmark")) +
+  labs(
+    title = "Portfolio Value Comparison: Trading Strategy vs SPY",
+    x = "Date",
+    y = "Portfolio Value ($)"
+  ) +
+  theme_minimal() +
+  scale_color_manual("", values = c("Trading Strategy" = "red", "SPY Benchmark" = "steelblue"))
+
+# Sharpe Ratio for Trading Strategy
+mean_daily_return_strategy <- mean(test_data$Daily_Return, na.rm = TRUE)
+std_daily_return_strategy <- sd(test_data$Daily_Return, na.rm = TRUE)
+sharpe_ratio_strategy <- (mean_daily_return_strategy * 252) / (std_daily_return_strategy * sqrt(252))
+
+# Sharpe Ratio for SPY
+mean_daily_return_spy <- mean(spy_data$Daily_Return_SPY, na.rm = TRUE)
+std_daily_return_spy <- sd(spy_data$Daily_Return_SPY, na.rm = TRUE)
+sharpe_ratio_spy <- (mean_daily_return_spy * 252) / (std_daily_return_spy * sqrt(252))
+
+# Cumulative Return
+cumulative_return_strategy <- prod(1 + test_data$Daily_Return, na.rm = TRUE) - 1
+cumulative_return_spy <- prod(1 + spy_data$Daily_Return_SPY, na.rm = TRUE) - 1
+
+# Information Ratio (IR)
+# Calculate the tracking error: Standard deviation of the difference in returns
+tracking_error <- sd(test_data$Daily_Return - spy_data$Daily_Return_SPY, na.rm = TRUE)
+
+# Calculate excess return: Mean difference between strategy and benchmark returns
+excess_return <- mean(test_data$Daily_Return - spy_data$Daily_Return_SPY, na.rm = TRUE)
+
+# Information Ratio
+information_ratio <- (excess_return * 252) / (tracking_error * sqrt(252))
+
+# Print Metrics
+cat("Sharpe Ratio (Our Model):", sharpe_ratio_strategy, "\n")
+cat("Sharpe Ratio (SPY Benchmark):", sharpe_ratio_spy, "\n")
+cat("Cumulative Return (Our Model):", cumulative_return_strategy, "\n")
+cat("Cumulative Return (SPY Benchmark):", cumulative_return_spy, "\n")
+cat("Information Ratio (Our Model):", information_ratio, "\n")
+
+
+```
+
+
+
+
+```{r echo=FALSE, warning=FALSE}
+
+# Add a year column to the test_data and spy_data datasets
+test_data <- test_data %>%
+  mutate(year = year(date))
+
+spy_data <- spy_data %>%
+  mutate(year = year(date))
+
+# Calculate Sharpe Ratio year by year for the Trading Strategy
+sharpe_ratio_by_year <- test_data %>%
+  group_by(year) %>%
+  summarise(
+    mean_daily_return = mean(Daily_Return, na.rm = TRUE),
+    std_daily_return = sd(Daily_Return, na.rm = TRUE),
+    sharpe_ratio = (mean_daily_return * 252) / (std_daily_return * sqrt(252))
+  )
+
+# Calculate Sharpe Ratio year by year for the SPY Benchmark
+sharpe_ratio_spy_by_year <- spy_data %>%
+  group_by(year) %>%
+  summarise(
+    mean_daily_return = mean(Daily_Return_SPY, na.rm = TRUE),
+    std_daily_return = sd(Daily_Return_SPY, na.rm = TRUE),
+    sharpe_ratio = (mean_daily_return * 252) / (std_daily_return * sqrt(252))
+  )
+
+# Merge the two datasets for comparison
+sharpe_ratios_comparison <- left_join(sharpe_ratio_by_year, sharpe_ratio_spy_by_year, by = "year", suffix = c("_strategy", "_spy"))
+
+# Display the results
+print(sharpe_ratios_comparison)
+
+
+ggplot(sharpe_ratios_comparison, aes(x = year)) +
+  geom_line(aes(y = sharpe_ratio_strategy, color = "Trading Strategy"), size = 1) +
+  geom_line(aes(y = sharpe_ratio_spy, color = "SPY Benchmark"), size = 1) +
+  labs(
+    title = "Sharpe Ratios Year by Year: Trading Strategy vs SPY",
+    x = "Year",
+    y = "Sharpe Ratio"
+  ) +
+  theme_minimal() +
+  scale_color_manual("", values = c("Trading Strategy" = "red", "SPY Benchmark" = "steelblue"))
+
+```
+
+
+From this we see that our sharpe ratio has not been consistent and on average for period of 2015-2020 we got 0.2258, but ranged from +2 to -0.8
+
+```{r echo=FALSE, warning=FALSE}
+
+# Ensure `test_data` and `GOOG` are filtered for the matching date range
+test_data <- test_data %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2019-12-31"))
+
+goog_data <- GOOG %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2019-12-31")) %>%
+  mutate(Daily_Return_GOOG = (PRC / lag(PRC)) - 1) %>%
+  drop_na()
+
+# Set initial investment
+initial_investment <- 10000
+
+# Calculate cumulative portfolio value for GOOG
+goog_data <- goog_data %>%
+  mutate(
+    Portfolio_Value_GOOG = initial_investment * cumprod(1 + Daily_Return_GOOG) # Portfolio value over time
+  )
+
+# Calculate cumulative portfolio value for Trading Strategy
+test_data <- test_data %>%
+  mutate(
+    Portfolio_Value_Strategy = initial_investment * cumprod(1 + Daily_Return) # Portfolio value over time
+  )
+
+# Combine both datasets for plotting
+comparison_data <- test_data %>%
+  select(date, Portfolio_Value_Strategy) %>%
+  left_join(goog_data %>% select(date, Portfolio_Value_GOOG), by = "date")
+
+# Plot cumulative portfolio value comparison
+ggplot(comparison_data, aes(x = date)) +
+  geom_line(aes(y = Portfolio_Value_Strategy, color = "Our Model")) +
+  geom_line(aes(y = Portfolio_Value_GOOG, color = "GOOG")) +
+  labs(
+    title = "Portfolio Value Comparison: Our Model vs GOOG",
+    x = "Date",
+    y = "Portfolio Value ($)"
+  ) +
+  theme_minimal() +
+  scale_color_manual("", values = c("Our Model" = "red", "GOOG" = "steelblue"))
+
+# Calculate Sharpe Ratio for Trading Strategy
+mean_daily_return_strategy <- mean(test_data$Daily_Return, na.rm = TRUE)
+std_daily_return_strategy <- sd(test_data$Daily_Return, na.rm = TRUE)
+sharpe_ratio_strategy <- (mean_daily_return_strategy * 252) / (std_daily_return_strategy * sqrt(252))
+
+# Calculate Sharpe Ratio for GOOG
+mean_daily_return_goog <- mean(goog_data$Daily_Return_GOOG, na.rm = TRUE)
+std_daily_return_goog <- sd(goog_data$Daily_Return_GOOG, na.rm = TRUE)
+sharpe_ratio_goog <- (mean_daily_return_goog * 252) / (std_daily_return_goog * sqrt(252))
+
+# Calculate cumulative return
+cumulative_return_strategy <- prod(1 + test_data$Daily_Return, na.rm = TRUE) - 1
+cumulative_return_goog <- prod(1 + goog_data$Daily_Return_GOOG, na.rm = TRUE) - 1
+
+# Calculate Information Ratio (IR)
+# Step 1: Calculate tracking error: Standard deviation of the difference in returns
+tracking_error <- sd(test_data$Daily_Return - goog_data$Daily_Return_GOOG, na.rm = TRUE)
+
+# Step 2: Calculate excess return: Mean difference between strategy and GOOG returns
+excess_return <- mean(test_data$Daily_Return - goog_data$Daily_Return_GOOG, na.rm = TRUE)
+
+# Step 3: Calculate Information Ratio
+information_ratio <- (excess_return * 252) / (tracking_error * sqrt(252))
+
+# Print metrics
+cat("Sharpe Ratio (Trading Strategy):", sharpe_ratio_strategy, "\n")
+cat("Sharpe Ratio (GOOG):", sharpe_ratio_goog, "\n")
+cat("Cumulative Return (Trading Strategy):", cumulative_return_strategy, "\n")
+cat("Cumulative Return (GOOG):", cumulative_return_goog, "\n")
+cat("Information Ratio (Trading Strategy vs GOOG):", information_ratio, "\n")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
